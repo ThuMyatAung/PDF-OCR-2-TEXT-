@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="my">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Book Visual Reader & Translator</title>
+  
+  <!-- PDF.js (Legacy Stable Version) & Marked.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --accent: #38bdf8;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    input[type="text"], input[type="file"], select {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    button {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      padding: 7px 13px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    button:disabled { background: #475569; cursor: not-allowed; }
+    .status-badge {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #334155;
+      color: #94a3b8;
+    }
+    .main-workspace {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      flex: 1;
+      height: calc(100vh - 60px);
+      overflow: hidden;
+    }
+    .panel {
+      padding: 20px;
+      overflow-y: auto;
+      height: 100%;
+      box-sizing: border-box;
+    }
+    .panel-left {
+      border-right: 1px solid var(--border);
+      background: #182234;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .panel-right {
+      background: var(--bg);
+      line-height: 1.7;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+      box-shadow: 0 10px 20px rgba(0,0,0,0.6);
+      border-radius: 4px;
+      background: #fff;
+    }
+    .nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      text-align: left;
+    }
+    th { background: #1e293b; color: var(--accent); }
+    blockquote {
+      border-left: 4px solid var(--accent);
+      margin: 12px 0;
+      padding: 6px 12px;
+      background: #1e293b;
+      color: #cbd5e1;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <b>📖 AI PDF Reader</b>
+  
+  <input type="file" id="pdfInput" accept="application/pdf" />
+  <input type="text" id="apiKeyInput" placeholder="Paste Gemini API Key" style="width: 200px;" />
+
+  <div class="nav-controls">
+    <button id="prevBtn" onclick="changePage(-1)" disabled>◀ ရှေ့</button>
+    <span id="pageTracker">Page: 0 / 0</span>
+    <button id="nextBtn" onclick="changePage(1)" disabled>နောက် ▶</button>
+    <button id="translateBtn" onclick="translateCurrentPage()" style="background:#0284c7;" disabled>⚡ ဘာသာပြန်မည်</button>
+  </div>
+  <span id="statusInfo" class="status-badge">အသင့်ဖြစ်ပါသည်</span>
+</header>
+
+<div class="main-workspace">
+  <!-- Left Side: Original PDF Canvas -->
+  <div class="panel panel-left" id="canvasContainer">
+    <canvas id="pdfCanvas"></canvas>
+  </div>
+
+  <!-- Right Side: Markdown Translation -->
+  <div class="panel panel-right" id="translationOutput">
+    <div style="color: #94a3b8; text-align: center; margin-top: 50px;">
+      PDF ဖိုင် တင်ပြီးပါက ဤနေရာတွင် စာမျက်နှာအလိုက် ဘာသာပြန်ချက်များ ပေါ်လာပါမည်။
+    </div>
+  </div>
+</div>
+
+<script>
+  // ၁။ Local file:// တွင် CORS Error မတက်စေရန် Worker ကို Safe Blob ဖြင့် ခေါ်ယူခြင်း
+  try {
+    const workerScript = `importScripts('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js');`;
+    const blob = new Blob([workerScript], { type: 'application/javascript' });
+    pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
+  } catch (e) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+  }
+
+  let currentPdf = null;
+  let currentPageNum = 1;
+  let totalPages = 0;
+  let currentRenderTask = null;
+  let pageTranslations = {};
+
+  const canvas = document.getElementById('pdfCanvas');
+  const ctx = canvas.getContext('2d');
+  const output = document.getElementById('translationOutput');
+  const pageTracker = document.getElementById('pageTracker');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const translateBtn = document.getElementById('translateBtn');
+  const apiKeyInput = document.getElementById('apiKeyInput');
+  const statusInfo = document.getElementById('statusInfo');
+
+  function updateStatus(text, isError = false) {
+    statusInfo.innerText = text;
+    statusInfo.style.color = isError ? '#f87171' : '#38bdf8';
+    statusInfo.style.background = isError ? '#450a0a' : '#1e293b';
+  }
+
+  // Load API Key from local cache
+  if (localStorage.getItem('gemini_api_key')) {
+    apiKeyInput.value = localStorage.getItem('gemini_api_key');
+  }
+  apiKeyInput.addEventListener('change', () => {
+    localStorage.setItem('gemini_api_key', apiKeyInput.value.trim());
+  });
+
+  // ၂။ PDF ဖိုင် တင်သွင်းခြင်း (URL.createObjectURL ဖြင့် Memory မပြည့်အောင် ဖွင့်ခြင်း)
+  document.getElementById('pdfInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    updateStatus("ဖိုင်ကို ဖွင့်နေပါသည်...");
+    output.innerHTML = "<p style='color:#94a3b8'>စာအုပ်ကို စတင်ဖတ်ရှုနေပါသည်...</p>";
+
+    try {
+      // arrayBuffer အစား Blob URL သုံးထား၍ ၁၅၀ MB ဖိုင်ကြီးများကို စက္ကန့်ပိုင်းဖြင့် ဖတ်နိုင်သည်
+      const fileUrl = URL.createObjectURL(file);
+      
+      const loadingTask = pdfjsLib.getDocument({
+        url: fileUrl,
+        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/cmaps/',
+        cMapPacked: true
+      });
+
+      currentPdf = await loadingTask.promise;
+      totalPages = currentPdf.numPages;
+      currentPageNum = 1;
+
+      updateStatus(`စာအုပ်ဖတ်ပြီး (စုစုပေါင်း ${totalPages} မျက်နှာ)`);
+      renderPage(currentPageNum);
+    } catch (err) {
+      console.error(err);
+      updateStatus("ဖိုင်ဖတ်မရပါ", true);
+      output.innerHTML = `<p style='color:#ef4444;'><b>PDF ဖွင့်ရာတွင် အမှားဖြစ်ပေါ်ပါသည်:</b><br/>${err.message}</p>`;
+    }
+  });
+
+  // ၃။ စာမျက်နှာကို Canvas ပေါ် ဆွဲတင်ခြင်း
+  async function renderPage(num) {
+    if (!currentPdf) return;
+
+    // အကယ်၍ အရင်စာမျက်နှာ ဆွဲလက်စရှိနေပါက ရပ်တန့်ခြင်း
+    if (currentRenderTask) {
+      currentRenderTask.cancel();
+    }
+
+    updateStatus(`စာမျက်နှာ (${num}) ကို ပြသနေသည်...`);
+
+    try {
+      const page = await currentPdf.getPage(num);
+      const viewport = page.getViewport({ scale: 1.5 });
+
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      currentRenderTask = page.render({ canvasContext: ctx, viewport: viewport });
+      await currentRenderTask.promise;
+      currentRenderTask = null;
+
+      pageTracker.innerText = `Page: ${num} / ${totalPages}`;
+      prevBtn.disabled = num <= 1;
+      nextBtn.disabled = num >= totalPages;
+      translateBtn.disabled = false;
+      updateStatus("အဆင်သင့်ဖြစ်ပါသည်");
+
+      // အရင် ဘာသာပြန်ထားပြီးသား ရှိပါက ပြန်ပြပေးခြင်း
+      if (pageTranslations[num]) {
+        output.innerHTML = marked.parse(pageTranslations[num]);
+      } else {
+        output.innerHTML = `<p style='color: #64748b; font-style: italic;'>စာမျက်နှာ (${num}) ကို မူရင်းပုံစံအတိုင်း ဘယ်ဘက်တွင် ပြသထားပါသည်။ မြန်မာလို ဘာသာပြန်ရန် အပေါ်ရှိ '⚡ ဘာသာပြန်မည်' ကို နှိပ်ပါခင်ဗျာ။</p>`;
+      }
+    } catch (err) {
+      if (err.name !== 'RenderingCancelledException') {
+        console.error(err);
+        updateStatus("Render Error", true);
+      }
+    }
+  }
+
+  function changePage(delta) {
+    if (currentPageNum + delta >= 1 && currentPageNum + delta <= totalPages) {
+      currentPageNum += delta;
+      renderPage(currentPageNum);
+    }
+  }
+
+  // ၄။ Gemini Vision သို့ ပို့၍ စာသား၊ ဇယားနှင့် ပုံကြမ်းများ ဘာသာပြန်ခြင်း
+  async function translateCurrentPage() {
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+      alert("ကျေးဇူးပြု၍ အပေါ်ဘားရှိ အကွက်ထဲတွင် Gemini API Key ထည့်ပေးပါခင်ဗျာ။");
+      return;
+    }
+
+    translateBtn.disabled = true;
+    updateStatus("AI ဘာသာပြန်နေသည်...");
+    output.innerHTML = `<p style='color: #38bdf8;'>စာမျက်နှာ (${currentPageNum}) ရှိ စာသား၊ ဇယားကွက်နှင့် ပုံများကို Gemini AI ဖြင့် ဘာသာပြန်ဆိုနေပါသည်... ခေတ္တစောင့်ပါ...</p>`;
+
+    try {
+      const base64Image = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+
+      const promptText = `
+You are an expert literary book translator. Translate the content of this book page into natural, elegant, flowing Burmese (မြန်မာစာ).
+Rules:
+1. Translate all text contextually into smooth Burmese prose.
+2. If there are TABLES: Render them cleanly as Markdown tables with Burmese headers and rows.
+3. If there are DIAGRAMS or ILLUSTRATIONS: 
+   - Translate all labels.
+   - Provide a blockquote summary: > **[ပုံကြမ်း/ဇယား ရှင်းလင်းချက်: ...]** explaining the illustration.
+4. Return clean Markdown only.`;
+
+      // gemini-2.0-flash (အမြန်ဆုံးနှင့် အခမဲ့ Multimodal Model)
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: promptText },
+              { inline_data: { mime_type: "image/jpeg", data: base64Image } }
+            ]
+          }]
+        })
+      });
+
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.message);
+
+      const translatedMarkdown = data.candidates[0].content.parts[0].text;
+      pageTranslations[currentPageNum] = translatedMarkdown;
+      output.innerHTML = marked.parse(translatedMarkdown);
+      updateStatus("ပြီးစီးပါပြီ");
+
+    } catch (err) {
+      console.error(err);
+      updateStatus("ဘာသာပြန် မအောင်မြင်ပါ", true);
+      output.innerHTML = `<p style='color: #ef4444;'><b>ဘာသာပြန်ရာတွင် အမှားဖြစ်ပေါ်ပါသည်:</b><br/>${err.message}</p>`;
+    } finally {
+      translateBtn.disabled = false;
+    }
+  }
+</script>
+
+</body>
+</html>
